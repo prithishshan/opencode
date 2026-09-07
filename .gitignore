@@ -2,6 +2,8 @@ node_modules
 .DS_Store
 coverage
 coverage-html
+coverage_html
+.vscode
 *.lcov
 .turbo
 .qlty

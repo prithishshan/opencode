@@ -191,14 +191,23 @@ function addServerPrimaryButton(input: {
 }): AddServerPrimaryButton {
   const ready = !!input.selectedDistro && wslDistroReady(input.state, input.selectedDistro)
   const probingSelected = input.probingAddable && !addServerSelectedDistroSettled(input.state, input.selectedDistro)
-  const probingOpencode =
-    probingSelected ||
-    (ready &&
-      (!input.opencodeCheck ||
-        (!!input.selectedDistro &&
-          input.state?.job?.kind === "probe-addable" &&
-          input.state.job.distros.includes(input.selectedDistro))))
-  const installingOpencode =
+
+  const selectedDistro = input.selectedDistro;
+  const job = input.state?.job;
+
+  const distroIsAddable =
+    !!selectedDistro &&
+    job?.kind === "probe-addable" &&
+    job.distros.includes(selectedDistro);
+
+  const probingOpencode = probingSelected || (ready && (!input.opencodeCheck || distroIsAddable));
+  // const probingOpencode = probingSelected ||
+  //   (ready &&
+  //     (!input.opencodeCheck ||
+  //       (!!input.selectedDistro &&
+  //         input.state?.job?.kind === "probe-addable" &&
+  //         input.state.job.distros.includes(input.selectedDistro))))
+   const installingOpencode =
     input.state?.job?.kind === "install-opencode" && input.state.job.distro === input.selectedDistro
   if (!ready || probingOpencode) {
     return {

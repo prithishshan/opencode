@@ -7,7 +7,7 @@ import {
   createProbeFailureGate,
   runAddableProbePlan,
   wslOpencodeAction,
-  wslRuntimeRetryable,
+  wslRuntimeRetryable
 } from "./settings-model"
 import type { WslServersState } from "./types"
 
@@ -214,6 +214,36 @@ describe("WSL server settings presentation", () => {
     expect(model.primaryButton.action).toBe("install-opencode")
   })
 
+  test("correct button loads when server probing selected", () => {
+     const model = addServerViewModel({
+      state: {
+        ...readyWslState,
+        installed: [
+          { name: "Debian", version: 2, isDefault: true },
+          { name: "Ubuntu", version: 2, isDefault: false },
+        ],
+        online: [{ name: "Alpine", label: "Alpine Linux" }],
+        distroProbes: {
+          Ubuntu: { name: "Ubuntu", canExecute: true, hasBash: true, hasCurl: true, error: null },
+        },
+      },
+      view: "main",
+      selectedDistro: null,
+      catalogSearch: "",
+      catalogTarget: null,
+      adding: true,
+      probingAddable: true,
+    })
+    expect(model.primaryButton).toEqual({
+      variant: "contrast",
+      label: { key: "wsl.onboarding.distroStatus.checking" },
+      disabled: true,
+      action: null,
+      loading: true,
+      width: null,
+    })
+  })
+  
   test("delegates addable probe plans to one batch command", async () => {
     const calls: string[][] = []
 
