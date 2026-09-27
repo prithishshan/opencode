@@ -1,13 +1,15 @@
 import { Effect } from "effect"
-import { effectCmd } from "../effect-cmd"
+import { effectCmd, fail, CliError } from "../effect-cmd"
 import { Session } from "@/session/session"
 import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Project } from "@/project/project"
 import { InstanceRef } from "@/effect/instance-ref"
+import { writeFile } from "fs/promises"
+import { join } from "path"
 
-interface SessionStats {
+export interface SessionStats {
   totalSessions: number
   totalMessages: number
   totalCost: number
@@ -65,6 +67,11 @@ export const StatsCommand = effectCmd({
       .option("project", {
         describe: "filter by project (default: all projects, empty string: current project)",
         type: "string",
+      })
+      .option("export", {
+        describe: "export stats to a file as 'json', 'csv', or 'md'",
+        type: "string",
+        choices: ["json", "csv", "md"],
       }),
   handler: Effect.fn("Cli.stats")(function* (args) {
     const ctx = yield* InstanceRef
@@ -76,7 +83,8 @@ export const StatsCommand = effectCmd({
     } else if (typeof args.models === "number") {
       modelLimit = args.models
     }
-    displayStats(stats, args.tools, modelLimit)
+
+    yield* reportStats(stats, args.tools, modelLimit, args.export)
   }),
 })
 
@@ -381,6 +389,201 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
     console.log("└────────────────────────────────────────────────────────┘")
   }
   console.log()
+}
+
+// One deliberate export payload shared by json, csv and md, so all three
+// describe the same numbers under the same names. Limits are applied here: an
+// absent --tools/--models means "everything", not "nothing" — unlike the
+// terminal renderer, where model output is opt-in.
+export function shapeStats(stats: SessionStats, toolLimit?: number, modelLimit?: number) {
+  return {
+    meta: {
+      generated_at: new Date().toISOString(),
+      days: stats.days,
+      // dateRange is seeded with Date.now()/0, so it is meaningless with no sessions.
+      earliest: stats.totalSessions === 0 ? "" : new Date(stats.dateRange.earliest).toISOString(),
+      latest: stats.totalSessions === 0 ? "" : new Date(stats.dateRange.latest).toISOString(),
+    },
+    overview: {
+      sessions: stats.totalSessions,
+      messages: stats.totalMessages,
+      cost_usd: round(stats.totalCost, 4),
+      cost_per_day_usd: round(stats.costPerDay, 4),
+      tokens_per_session: round(stats.tokensPerSession),
+      median_tokens_per_session: round(stats.medianTokensPerSession),
+    },
+    tokens: {
+      input: stats.totalTokens.input,
+      output: stats.totalTokens.output,
+      reasoning: stats.totalTokens.reasoning,
+      cache_read: stats.totalTokens.cache.read,
+      cache_write: stats.totalTokens.cache.write,
+      total:
+        stats.totalTokens.input +
+        stats.totalTokens.output +
+        stats.totalTokens.reasoning +
+        stats.totalTokens.cache.read +
+        stats.totalTokens.cache.write,
+    },
+    models: Object.entries(stats.modelUsage)
+      .sort(([, a], [, b]) => b.messages - a.messages)
+      .slice(0, modelLimit)
+      .map(([id, usage]) => ({
+        id,
+        messages: usage.messages,
+        input: usage.tokens.input,
+        output: usage.tokens.output,
+        cache_read: usage.tokens.cache.read,
+        cache_write: usage.tokens.cache.write,
+        cost_usd: round(usage.cost, 4),
+      })),
+    tools: Object.entries(stats.toolUsage)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, toolLimit)
+      .map(([name, calls]) => ({ name, calls })),
+  }
+}
+
+type ExportPayload = ReturnType<typeof shapeStats>
+
+// Aggregation emits NaN for empty datasets; JSON.stringify would turn that into
+// null and CSV into the literal "NaN", so collapse it at the boundary.
+function round(value: number, places = 2) {
+  if (!Number.isFinite(value)) return 0
+  return Number(value.toFixed(places))
+}
+
+const writeExport = Effect.fn("Cli.stats.export.write")(function* (body: string, extension: string) {
+  const target = join(process.cwd(), `opencode_stats_${Date.now()}.${extension}`)
+  yield* Effect.promise(() => writeFile(target, body, "utf8"))
+  process.stderr.write(`Wrote ${target}\n`)
+})
+
+export const jsonExportStats = Effect.fn("Cli.stats.export.json")(function* (
+  stats: SessionStats,
+  toolLimit?: number,
+  modelLimit?: number,
+) {
+  yield* writeExport(JSON.stringify(shapeStats(stats, toolLimit, modelLimit), null, 2) + "\n", "json")
+})
+
+export const csvExportStats = Effect.fn("Cli.stats.export.csv")(function* (
+  stats: SessionStats,
+  toolLimit?: number,
+  modelLimit?: number,
+) {
+  yield* writeExport(renderCsv(shapeStats(stats, toolLimit, modelLimit)), "csv")
+})
+
+export const mdExportStats = Effect.fn("Cli.stats.export.md")(function* (
+  stats: SessionStats,
+  toolLimit?: number,
+  modelLimit?: number,
+) {
+  yield* writeExport(renderMarkdown(shapeStats(stats, toolLimit, modelLimit)), "md")
+})
+
+// Tidy long format: one row per metric, so adding a metric adds rows rather than
+// columns and a saved pivot keeps working.
+export function renderCsv(data: ExportPayload) {
+  const rows = ["scope,scope_id,metric,value"]
+  const add = (scope: string, id: string, metric: string, value: number | string) =>
+    rows.push([scope, csvField(id), metric, csvField(String(value))].join(","))
+  for (const [metric, value] of Object.entries(data.meta)) add("meta", "", metric, value)
+  for (const [metric, value] of Object.entries(data.overview)) add("overview", "", metric, value)
+  for (const [metric, value] of Object.entries(data.tokens)) add("tokens", "", metric, value)
+  for (const model of data.models) {
+    for (const [metric, value] of Object.entries(model)) {
+      if (metric === "id") continue
+      add("model", model.id, metric, value)
+    }
+  }
+  for (const tool of data.tools) add("tool", tool.name, "calls", tool.calls)
+  return rows.join("\n") + "\n"
+}
+
+function csvField(value: string) {
+  if (!/[",\n]/.test(value)) return value
+  return `"${value.replaceAll('"', '""')}"`
+}
+
+export function renderMarkdown(data: ExportPayload) {
+  const n = (value: number) => value.toLocaleString("en-US")
+  const window = data.meta.earliest ? ` · ${data.meta.earliest} → ${data.meta.latest}` : ""
+  return [
+    "# opencode usage stats",
+    "",
+    `Generated \`${data.meta.generated_at}\` · ${data.meta.days} day window${window}`,
+    "",
+    "## Overview",
+    "",
+    "| Metric | Value |",
+    "| --- | ---: |",
+    `| Sessions | ${n(data.overview.sessions)} |`,
+    `| Messages | ${n(data.overview.messages)} |`,
+    `| Total cost | $${data.overview.cost_usd} |`,
+    `| Avg cost/day | $${data.overview.cost_per_day_usd} |`,
+    `| Avg tokens/session | ${n(data.overview.tokens_per_session)} |`,
+    `| Median tokens/session | ${n(data.overview.median_tokens_per_session)} |`,
+    "",
+    "## Tokens",
+    "",
+    "| Metric | Tokens |",
+    "| --- | ---: |",
+    `| Input | ${n(data.tokens.input)} |`,
+    `| Output | ${n(data.tokens.output)} |`,
+    `| Reasoning | ${n(data.tokens.reasoning)} |`,
+    `| Cache read | ${n(data.tokens.cache_read)} |`,
+    `| Cache write | ${n(data.tokens.cache_write)} |`,
+    `| **Total** | **${n(data.tokens.total)}** |`,
+    "",
+    "## Model usage",
+    "",
+    ...modelTable(data.models, n),
+    "## Tool usage",
+    "",
+    ...toolTable(data.tools, n),
+  ].join("\n")
+}
+
+function modelTable(models: ExportPayload["models"], n: (value: number) => string) {
+  if (models.length === 0) return ["_No model usage recorded._", ""]
+  return [
+    "| Model | Messages | Input | Output | Cache read | Cache write | Cost |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ...models.map(
+      (model) =>
+        `| \`${model.id}\` | ${n(model.messages)} | ${n(model.input)} | ${n(model.output)} | ` +
+        `${n(model.cache_read)} | ${n(model.cache_write)} | $${model.cost_usd} |`,
+    ),
+    "",
+  ]
+}
+
+function toolTable(tools: ExportPayload["tools"], n: (value: number) => string) {
+  if (tools.length === 0) return ["_No tool usage recorded._", ""]
+  return ["| Tool | Calls |", "| --- | ---: |", ...tools.map((tool) => `| \`${tool.name}\` | ${n(tool.calls)} |`), ""]
+}
+
+// Returns an Effect rather than running the work, so the CLI handler's runtime
+// awaits the write. Every branch stays lazy: a missing `yield*` must skip the
+// table too, not silently skip only the export.
+export function reportStats(
+  stats: SessionStats,
+  toolLimit?: number,
+  modelLimit?: number,
+  format?: string,
+): Effect.Effect<void, CliError> {
+  switch (format) {
+    case "csv":
+      return csvExportStats(stats, toolLimit, modelLimit)
+    case "md":
+      return mdExportStats(stats, toolLimit, modelLimit)
+    case "json":
+      return jsonExportStats(stats, toolLimit, modelLimit)
+    default:
+      return Effect.sync(() => displayStats(stats, toolLimit, modelLimit))
+  }
 }
 
 function formatNumber(num: number): string {

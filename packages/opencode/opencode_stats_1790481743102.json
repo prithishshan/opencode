@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "generated_at": "2026-09-27T04:02:23.101Z",
+    "days": 19,
+    "earliest": "2026-08-26T23:55:58.233Z",
+    "latest": "2026-09-14T18:51:40.040Z"
+  },
+  "overview": {
+    "sessions": 7,
+    "messages": 12,
+    "cost_usd": 0,
+    "cost_per_day_usd": 0,
+    "tokens_per_session": 11115.86,
+    "median_tokens_per_session": 0
+  },
+  "tokens": {
+    "input": 30467,
+    "output": 4336,
+    "reasoning": 0,
+    "cache_read": 43008,
+    "cache_write": 0,
+    "total": 77811
+  },
+  "models": [
+    {
+      "id": "opencode/big-pickle",
+      "messages": 6,
+      "input": 30467,
+      "output": 4336,
+      "cache_read": 43008,
+      "cache_write": 0,
+      "cost_usd": 0
+    }
+  ],
+  "tools": []
+}

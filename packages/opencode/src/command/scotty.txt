@@ -1,0 +1,7 @@
+---
+description: Out put scotty dog ascii art
+agent: build
+model: anthropic/claude-3-5-sonnet-20241022
+---
+
+Output a scottish terrier "scotty dog" ascii art.
